@@ -1,0 +1,11 @@
+# 运行时数据与报告属于个人隐私,一律不入库
+data/
+reports/
+
+# 打包产物(exe 通过 GitHub Releases 分发,不进仓库)
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+build_log.txt
