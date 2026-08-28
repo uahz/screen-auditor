@@ -1,10 +1,13 @@
 """前台窗口采样器(仅 Windows)。
 
-每 POLL_INTERVAL 秒读取一次当前焦点窗口的进程名与标题;
-只有内容变化或到达 HEARTBEAT 间隔时才落库,空闲超过阈值后样本标记为未专注。
+每 poll_interval 秒读取一次当前焦点窗口的进程名与标题;
+只有内容变化或到达 heartbeat 间隔时才落库,空闲超过阈值后样本标记为未专注。
+命中忽略名单(进程名 / 标题正则)的窗口完全不记录。
 零第三方依赖:全部通过 ctypes 调用系统 API。
 """
+import configparser
 import ctypes
+import json
 import signal
 import time
 
@@ -12,6 +15,8 @@ try:
     from ctypes import wintypes
 except ImportError:  # 非 Windows 平台,screentime.py 会先行拦截
     wintypes = None
+
+import db
 
 POLL_INTERVAL = 3      # 采样间隔(秒)
 HEARTBEAT = 60         # 同一窗口状态的心跳写入间隔(秒)
@@ -22,6 +27,66 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 class _LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint32)]
+
+
+def load_config() -> dict:
+    """从 data/config.ini 读取采样配置;文件不存在则生成带注释的默认配置。"""
+    path = db.DATA_DIR / "config.ini"
+    if not path.exists():
+        path.write_text(
+            "[tracker]\n"
+            "# 采样间隔(秒),越小越精确,建议 2~10\n"
+            "poll_interval = 3\n"
+            "# 同一窗口状态的心跳写入间隔(秒),用于证明窗口仍在焦点\n"
+            "heartbeat = 60\n"
+            "# 无键鼠输入超过该秒数记为“离开”(注:纯阅读也会被算作离开)\n"
+            "idle_threshold = 120\n",
+            encoding="utf-8",
+        )
+    cp = configparser.ConfigParser()
+    cp.read(path, encoding="utf-8")
+    t = cp["tracker"] if cp.has_section("tracker") else configparser.SectionProxy(cp, "tracker")
+
+    def _int(name, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(t.get(name, str(default)))))
+        except (ValueError, TypeError):
+            return default
+
+    return {
+        "poll_interval": _int("poll_interval", POLL_INTERVAL, 1, 60),
+        "heartbeat": _int("heartbeat", HEARTBEAT, 10, 600),
+        "idle_threshold": _int("idle_threshold", IDLE_THRESHOLD, 30, 3600),
+    }
+
+
+def load_ignore() -> dict:
+    """忽略名单:命中进程名或标题正则的窗口完全不记录。
+
+    data/ignore.json 结构:{"exe": ["snipaste.exe"], "title_regex": ["任务视图"]}
+    """
+    path = db.DATA_DIR / "ignore.json"
+    if not path.exists():
+        path.write_text(json.dumps(
+            {"exe": [], "title_regex": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"exe": set(), "regex": []}
+    import re
+    regexes = []
+    for pattern in raw.get("title_regex", []):
+        try:
+            regexes.append(re.compile(pattern))
+        except re.error:
+            continue
+    return {"exe": {e.lower() for e in raw.get("exe", [])}, "regex": regexes}
+
+
+def is_ignored(ignore: dict, exe: str, title: str) -> bool:
+    if exe in ignore["exe"]:
+        return True
+    return any(r.search(title) for r in ignore["regex"])
 
 
 def _init_api():
@@ -82,6 +147,8 @@ def foreground():
 def run_forever(log=print) -> None:
     import db
 
+    cfg = load_config()
+    ignore = load_ignore()
     stop = False
 
     def bye(*_):
@@ -93,16 +160,22 @@ def run_forever(log=print) -> None:
 
     conn = db.connect()
     last, last_write = None, 0
-    log(f"开始记录:每 {POLL_INTERVAL}s 采样一次,心跳 {HEARTBEAT}s,空闲阈值 {IDLE_THRESHOLD}s")
+    log(f"开始记录:每 {cfg['poll_interval']}s 采样,心跳 {cfg['heartbeat']}s,"
+        f"空闲阈值 {cfg['idle_threshold']}s,忽略名单 {len(ignore['exe'])} 进程/"
+        f"{len(ignore['regex'])} 正则")
     while not stop:
-        time.sleep(POLL_INTERVAL)
+        time.sleep(cfg["poll_interval"])
         try:
             exe, title = foreground()
         except Exception:
             continue
+        if is_ignored(ignore, exe, title):
+            last, last_write = None, 0  # 忽略窗口:断开心跳链,不产生任何记录
+            continue
         now = int(time.time())
-        sample = (exe, title, 0 if idle_seconds() >= IDLE_THRESHOLD else 1)
-        if sample != last or now - last_write >= HEARTBEAT:
+        focused = 0 if idle_seconds() >= cfg["idle_threshold"] else 1
+        sample = (exe, title, focused)
+        if sample != last or now - last_write >= cfg["heartbeat"]:
             db.insert_sample(conn, now, *sample)
             last, last_write = sample, now
     conn.close()

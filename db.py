@@ -3,6 +3,7 @@
 样本采用 append-only 写入(ts 为主键),采集进程被强杀也不会破坏已有历史,
 事后还可以用不同的口径重新分析原始数据。
 """
+import os
 import sqlite3
 import sys
 import time
@@ -16,14 +17,31 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _pick_data_dir(app_dir: Path) -> Path:
+    """exe 旁边不可写(如 Program Files)时,退回 %LOCALAPPDATA%/ScreenTime。"""
+    candidate = app_dir / "data"
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        probe = candidate / ".write_test"
+        probe.write_text("")
+        probe.unlink()
+        return candidate
+    except OSError:
+        fallback = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ScreenTime"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
 APP_DIR = _app_dir()
-DATA_DIR = APP_DIR / "data"
+DATA_DIR = _pick_data_dir(APP_DIR)
 DB_PATH = DATA_DIR / "screen_time.db"
 
 
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    # timeout 兜底:采集器心跳写入与报告生成并发时的短暂锁
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS samples (
             ts      INTEGER PRIMARY KEY,

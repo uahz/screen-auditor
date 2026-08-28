@@ -32,7 +32,7 @@ APPS = [
     ("msedge.exe", ["文档协作平台 - 登录页"], 0.03, set(range(9, 18))),
 ]
 
-SWITCH_EVERY = range(240, 1500, 60)   # 每个窗口停留 4~25 分钟
+SWITCH_EVERY = range(300, 2701, 60)   # 每个窗口停留 5~45 分钟,期间按分钟心跳落库
 
 
 def seed(days: int) -> None:
@@ -59,9 +59,17 @@ def seed(days: int) -> None:
             or [(a[0], a[1], a[2]) for a in APPS]
         exe, titles, w = random.choices(pool, weights=[p[2] for p in pool])[0]
         stay = random.choice(list(SWITCH_EVERY))
-        conn.execute("INSERT OR REPLACE INTO samples VALUES (?,?,?,1)",
-                     (ts, exe, f"{random.choice(titles)} - {guess_host(exe)}"))
-        ts += stay
+        chosen = f"{random.choice(titles)} - {guess_host(exe)}"
+        step = 60                                    # 模拟采集器的分钟级心跳
+        inner = ts
+        while inner < ts + stay and inner < end:
+            hour2 = datetime.fromtimestamp(inner).hour
+            if hour2 < 8:                            # 深夜截断(0-7 点不记录)
+                break
+            conn.execute("INSERT OR REPLACE INTO samples VALUES (?,?,?,1)",
+                         (inner, exe, chosen))
+            inner += step
+        ts = inner
     conn.commit()
     print(f"已写入 {conn.execute('SELECT COUNT(*) FROM samples').fetchone()[0]} 条演示样本"
           f" -> {db.DB_PATH}")

@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: pip install pyinstaller pytest
+      - name: Run unit tests
+        run: python -m pytest tests -q
+      - name: Build exe
+        run: >
+          python -m PyInstaller --noconfirm --onefile --console --name screentime
+          --icon assets/icon.ico --add-data "assets;assets" screentime.py
+      - name: Create release with exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }} dist/screentime.exe
+          --title "${{ github.ref_name }}" --generate-notes
